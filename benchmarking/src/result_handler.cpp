@@ -62,6 +62,8 @@ double std_dev(double mean, const std::vector<double>& data) {
 void ResultHandlerPathLength::handleResult(const BenchmarkResult& result, std::string, int, int) {
     last_description = result.description;
 
+    std::cout << "bonjour" << std::endl;
+
     for (size_t query_idx = 0; query_idx < result.success.size(); ++query_idx) {
         if (!result.success[query_idx] || result.path[query_idx].size() == 0)
             return;

@@ -41,14 +41,18 @@
 #include <ompl/base/ProblemDefinition.h>
 #include <ompl/base/objectives/PathLengthOptimizationObjective.h>
 #include <ompl/base/spaces/RealVectorStateSpace.h>
+#include <ompl/base/spaces/SpaceTimeStateSpace.h>
+#include <ompl/geometric/SimpleSetup.h>
 #include <ompl/geometric/planners/prm/ConnectionStrategy.h>
 #include <ompl/geometric/planners/prm/PRM.h>
 #include <ompl/geometric/planners/rrt/RRTstar.h>
+#include <ompl/geometric/planners/rrt/STRRTstar.h>
 
 #include <fstream>
 
 //#define OMPL_USE_NUM_NODES
 #define OMPL_USE_EDGE_LENGTH
+namespace ob = ompl::base;
 
 namespace ompl::geometric {
 
@@ -65,6 +69,91 @@ private:
     double m_edgeThreshold;
 };
 }  // namespace ompl::geometric
+
+class SpaceTimeMotionValidator : public ob::MotionValidator {
+
+public:
+    explicit SpaceTimeMotionValidator(const ob::SpaceInformationPtr &si) : MotionValidator(si),
+      vMax_(si_->getStateSpace().get()->as<ob::SpaceTimeStateSpace>()->getVMax()),
+      stateSpace_(si_->getStateSpace().get()) {};
+
+    bool checkMotion(const ob::State *s1, const ob::State *s2) const override
+    {
+        // assume motion starts in a valid configuration, so s1 is valid
+        if (!si_->isValid(s2)) {
+            invalid_++;
+            return false;
+        }
+
+        // check if motion is forward in time and is not exceeding the speed limit
+        auto *space = stateSpace_->as<ob::SpaceTimeStateSpace>();
+        auto deltaPos = space->distanceSpace(s1, s2);
+        double time1 = s1->as<ob::CompoundState>()->as<ob::TimeStateSpace::StateType>(1)->position;
+        double time2 = s2->as<ob::CompoundState>()->as<ob::TimeStateSpace::StateType>(1)->position;
+        auto deltaT = time2 - time1;
+
+        //std::cout << deltaPos << " " <<  deltaPos / deltaT << " " << vMax_ << std::endl;
+        if (!(deltaT > 0 && deltaPos / deltaT <= vMax_+0.01)) {
+            invalid_++;
+            return false;
+        }
+
+        // check if the path between the states is unconstrained (perform interpolation)...
+        int interpolation_amount = 25;
+        double posx1 = s1->as<ob::CompoundState>()->as<ob::RealVectorStateSpace::StateType>(0)->values[0];
+        double posy1 = s1->as<ob::CompoundState>()->as<ob::RealVectorStateSpace::StateType>(0)->values[1];
+        double posz1 = s1->as<ob::CompoundState>()->as<ob::RealVectorStateSpace::StateType>(0)->values[2];
+        double posx2 = s2->as<ob::CompoundState>()->as<ob::RealVectorStateSpace::StateType>(0)->values[0];
+        double posy2 = s2->as<ob::CompoundState>()->as<ob::RealVectorStateSpace::StateType>(0)->values[1];
+        double posz2 = s2->as<ob::CompoundState>()->as<ob::RealVectorStateSpace::StateType>(0)->values[2];
+        double posx0; //Variable
+        double posy0; //Variable
+        double posz0; //Variable
+        double time0; //Variable
+
+        for (int i = 0; i < interpolation_amount; i++)
+        {
+            /*
+            t = (time - t1) / (t2 - t1)
+            x = x1 + t * (x2 - x1)
+            y = y1 + t * (y2 - y1)
+            z = z1 + t * (z2 - z1)
+            */
+
+            float percent = (float)i / interpolation_amount;
+            posx0 = posx1 + percent * (posx2 - posx1);
+            posy0 = posy1 + percent * (posy2 - posy1);
+            posz0 = posz1 + percent * (posz2 - posz1);
+            time0 = time1 + percent * deltaT;
+
+            auto space = si_->getStateSpace();
+            ompl::base::ScopedState<> temp_state(space);
+            temp_state->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[0] = posx0;
+            temp_state->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[1] = posy0;
+            temp_state->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[2] = posz0;
+            temp_state->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ob::TimeStateSpace::StateType>(1)->position = time0;
+
+            if (!si_->isValid(temp_state->as<ompl::base::SpaceTimeStateSpace::StateType>())) {
+                invalid_++;
+                return false;
+            }
+        }
+
+
+        return true;
+    }
+
+    bool checkMotion(const ompl::base::State *, const ompl::base::State *,
+                     std::pair<ob::State *, double> &) const override
+    {
+        std::cout << "throwing" << std::endl;
+        throw ompl::Exception("SpaceTimeMotionValidator::checkMotion", "not implemented");
+    }
+
+private:
+    double vMax_; // maximum velocity
+    ob::StateSpace *stateSpace_; // the animation state space for distance calculation
+};
 
 namespace benchmarking {
 
@@ -197,6 +286,102 @@ private:
     double m_time;
 };
 
+class STValidityCheckerDynObst : public ompl::base::StateValidityChecker {
+public:
+    STValidityCheckerDynObst(const ompl::base::SpaceInformationPtr& si, std::shared_ptr<benchmarking::Benchmark> bm, double time)
+        : ompl::base::StateValidityChecker(si), benchmark(bm), m_time(time) {}
+
+    // Returns whether the given state's position overlaps the
+    // circular obstacle
+    bool isValid(const ompl::base::State* state) const {
+        bool valid = this->clearance(state) > 0.0;
+        return valid;
+    }
+
+    void set_time(double time) {
+        m_time = time;
+    }
+
+    // Returns the distance from the given state's position to the
+    // boundary of the circular obstacle.
+    double clearance(const ompl::base::State* state) const {
+        // We know we're working with a RealVectorStateSpace in this
+        // example, so we downcast state into the specific type.
+        const ompl::base::RealVectorStateSpace::StateType* state2D = 
+            state->as<ob::SpaceTimeStateSpace::StateType>()->as<ob::RealVectorStateSpace::StateType>(0);
+
+        double min_dist = 1e4;
+        if (benchmark->is_2d) {
+            // Extract the robot's (x,y) position from its state
+            double x = state2D->values[0];
+            double y = state2D->values[1];
+            Eigen::Vector2d pos(x, y);
+
+            // static obstacles:
+
+            for (const benchmarking::Circle& c : benchmark->circles) {
+                std::cout << "stagnant circles" << std::endl;
+                
+                // get minimum distance to circle
+                double dist = (pos - c.center.head(2)).norm() - c.radius;
+                if (dist < min_dist)
+                    min_dist = dist;
+            }
+
+            int i = 0;
+            for (const benchmarking::MovingCircle& mc : benchmark->moving_circles) {
+
+                Eigen::Vector3d pos_mc;
+                try{
+                    double time = state->as<ob::SpaceTimeStateSpace::StateType>()->as<ob::TimeStateSpace::StateType>(1)->position;
+                    pos_mc = mc.center + mc.velocity * time;
+                } catch(...)
+                {
+                    pos_mc = mc.center + mc.velocity * m_time;
+                }
+
+                double dist = (pos - pos_mc.head(2)).norm() - mc.radius;
+
+                //std::cout << i << ": " << dist << ": " << time << std::endl;
+                if (dist < min_dist)
+                    min_dist = dist;
+                
+                i++;
+            }
+        } else {  // 3D
+            // Extract the robot's (x,y) position from its state
+            double x = state2D->values[0];
+            double y = state2D->values[1];
+            double z = state2D->values[2];
+            Eigen::Vector3d pos(x, y, z);
+
+            // static obstacles:
+
+            for (const benchmarking::Circle& c : benchmark->circles) {
+                // get minimum distance to circle
+                double dist = (pos - c.center).norm() - c.radius;
+                if (dist < min_dist)
+                    min_dist = dist;
+            }
+
+            for (const benchmarking::MovingCircle& mc : benchmark->moving_circles) {
+                Eigen::Vector3d pos_mc = mc.center + mc.velocity * m_time;
+                double dist = (pos - pos_mc).norm() - mc.radius;
+                if (dist < min_dist)
+                    min_dist = dist;
+            }
+        }
+
+        //std::cout << min_dist << std::endl;
+        return min_dist;
+    }
+
+private:
+    std::shared_ptr<benchmarking::Benchmark> benchmark;
+    double m_time;
+};
+
+
 OMPLPlannerBenchmark::OMPLPlannerBenchmark(std::string planner) : m_planner(planner) {
     ompl::msg::setLogLevel(ompl::msg::LogLevel::LOG_NONE);
 }
@@ -222,6 +407,7 @@ void write_intermediate_path(std::shared_ptr<Benchmark> benchmark, const std::ve
 }
 
 BenchmarkResult OMPLPlannerBenchmark::runBenchmark(std::shared_ptr<Benchmark> benchmark, int benchmark_idx, int run_idx) {
+    
     if (benchmark->moving_circles.size() == 0) {
         BasePlannerBenchmark::startBenchmark();
 
@@ -333,7 +519,7 @@ BenchmarkResult OMPLPlannerBenchmark::runBenchmark(std::shared_ptr<Benchmark> be
         result.duration_micros = getTotalDuration();
 
         return result;
-    } else {
+    } else if (m_planner != "STRRTstar"){
         // moving circles --> run OMPL iteratively
         BasePlannerBenchmark::startBenchmark();
 
@@ -582,6 +768,117 @@ BenchmarkResult OMPLPlannerBenchmark::runBenchmark(std::shared_ptr<Benchmark> be
 
         result.path.push_back(full_path);
 
+        BasePlannerBenchmark::stopBenchmark();
+
+        result.description = "OMPL " + m_planner + " - " + benchmark->name;
+        result.duration_micros = getTotalDuration();
+
+        return result;
+    } else {
+        BasePlannerBenchmark::startBenchmark();
+        BenchmarkResult result;
+
+        std::cout << "Entering strrt benchmark" << std::endl;
+        // set maximum velocity
+        // TODO: redefine vMax to be something from inputs
+        double vMax = 0.5;
+
+        //ompl::base::StateSpacePtr space(new ompl::base::RealVectorStateSpace(2 + !benchmark->is_2d));
+        //space->as<ompl::base::RealVectorStateSpace>()->setBounds(0, benchmark->domain_size);
+        // construct the state space we are planning in
+        auto vectorSpace(std::make_shared<ob::RealVectorStateSpace>(2 + !benchmark->is_2d));
+        auto space = std::make_shared<ob::SpaceTimeStateSpace>(vectorSpace, vMax);
+
+        // set the bounds for R2 or R3
+        ob::RealVectorBounds bounds(2 + !benchmark->is_2d);
+        bounds.setLow(0);
+        bounds.setHigh(benchmark->domain_size);
+        vectorSpace->setBounds(bounds);
+
+        // set time bounds. Planning with unbounded time is also possible when using ST-RRT*.
+        // TODO: figure out how to make it unbounded
+        space->setTimeBounds(0.0, 50.0);
+
+        // create the space information class for the space
+        ob::SpaceInformationPtr si = std::make_shared<ob::SpaceInformation>(space);
+
+        // set state validity checking for this space
+        // TODO: check that motion validator works as expected
+        // TODO: check that validity checker dyn obst works as expected with spacetime-based si
+        ompl::base::StateValidityCheckerPtr validityChecker = std::make_shared<STValidityCheckerDynObst>(si, benchmark, 0.);
+        si->setStateValidityChecker(validityChecker);
+        //si->setStateValidityChecker([](const ob::State *state) { return isStateValid(state); });
+        si->setMotionValidator(std::make_shared<SpaceTimeMotionValidator>(si));
+
+        // define a simple setup class
+        ompl::geometric::SimpleSetup ss(si);
+
+        ompl::base::ScopedState<> start(space);
+        ompl::base::ScopedState<> goal(space);
+        start->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[0] = benchmark->start[0].x();
+        start->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[1] = benchmark->start[0].y();
+        if (!benchmark->is_2d)
+            start->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[2] = benchmark->start[0].z();
+
+        goal->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[0] = benchmark->goal[0].x();
+        goal->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[1] = benchmark->goal[0].y();
+        if (!benchmark->is_2d)
+            goal->as<ompl::base::SpaceTimeStateSpace::StateType>()->as<ompl::base::RealVectorStateSpace::StateType>(0)->values[2] = benchmark->goal[0].z();
+
+        // set the start and goal states
+        ss.setStartAndGoalStates(start, goal);
+
+        // construct the planner
+        auto *strrtStar = new ompl::geometric::STRRTstar(si);
+
+        // set planner parameters
+        strrtStar->setRange(vMax);
+
+        // set the used planner
+        ss.setPlanner(ob::PlannerPtr(strrtStar));
+
+        // attempt to solve the problem within one second of planning time
+        ob::PlannerStatus solved = ss.solve(5);
+
+        ompl::base::PlannerStatus::StatusType status;
+        if (solved)
+        {
+            std::cout << "Found solution:" << std::endl;
+            status = ompl::base::PlannerStatus::EXACT_SOLUTION;
+            // print the path to screen
+            //ss.getSolutionPath().print(std::cout);
+        }
+        else
+            std::cout << "No solution found" << std::endl;
+
+        //TODO: Add benchmark wrapper stuff around this so that we can visualize the solution
+        ompl::geometric::PathGeometric fullpath = ss.getSolutionPath();
+        std::vector<ompl::base::State*> states = fullpath.getStates();
+        std::vector<Eigen::Vector3d> fullpath_;
+        std::vector<double> fullpath_durations;
+        for (ompl::base::State* state : states)
+        {
+            const ompl::base::SpaceTimeStateSpace::StateType* spaceTimeState =
+                state->as<ompl::base::SpaceTimeStateSpace::StateType>();
+
+            const ompl::base::RealVectorStateSpace::StateType* spatialState =
+                spaceTimeState->as<ompl::base::RealVectorStateSpace::StateType>(0);
+            
+            double x = spatialState->values[0];
+            double y = spatialState->values[1];
+            double z = spatialState->values[2];
+            double t = spaceTimeState->as<ob::TimeStateSpace::StateType>(1)->position;
+            Eigen::Vector3d point_ = Eigen::Vector3d(x,y,z);
+
+            fullpath_.push_back( point_ );
+            fullpath_durations.push_back(t);
+        }
+
+        result.success.push_back(status == ompl::base::PlannerStatus::EXACT_SOLUTION);
+        result.timing_results.push_back(stopMeasurement("Solve query " + std::to_string(0)));
+
+        result.path.push_back(fullpath_);
+        result.path_durations.push_back(fullpath_durations);
         BasePlannerBenchmark::stopBenchmark();
 
         result.description = "OMPL " + m_planner + " - " + benchmark->name;

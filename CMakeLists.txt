@@ -49,9 +49,7 @@ add_subdirectory(examples)
 
 option(BUILD_BENCHMARKING "Build benchmarking" OFF)
 
-if(${BUILD_BENCHMARKING})
-  add_subdirectory(benchmarking)
-endif()
+add_subdirectory(benchmarking)
 
 # Header files
 install(FILES ${TPRM_HEADER_FILES} DESTINATION include)

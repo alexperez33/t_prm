@@ -67,7 +67,7 @@ std::shared_ptr<benchmarking::Benchmark> create_basic_bm(int iters) {
 
     // Register benchmarks
     auto b1 = std::make_shared<Benchmark>("Basic", iters);
-    b1->numNodes = 3000;  // TODO: CHANGE HERE (number of nodes of T-PRM)
+    b1->numNodes = 20000;  // TODO: CHANGE HERE (number of nodes of T-PRM)
 
     b1->start = {tprm::Vector3d::Zero()};
     b1->goal = {tprm::Vector3d::Constant(10.)};
@@ -75,11 +75,11 @@ std::shared_ptr<benchmarking::Benchmark> create_basic_bm(int iters) {
     b1->domain_size = 10.;
 
     // Specific
-    b1->tprm_cost_edge_threshold = 1.75;  // TODO: CHANGE HERE (edge connection radius of T-PRM)
+    b1->tprm_cost_edge_threshold = 0.25;  // TODO: CHANGE HERE (edge connection radius of T-PRM)
 
     b1->ompl_path_length_threshold = std::numeric_limits<double>::infinity();
-    b1->ompl_edge_length = 1.75;  // TODO: CHANGE HERE (edge connection radius of PRM)
-    b1->ompl_time_limit = 1.0;
+    b1->ompl_edge_length = 0.25;  // TODO: CHANGE HERE (edge connection radius of PRM)
+    b1->ompl_time_limit = 5.0;
 
     b1->is_2d = true; // TODO: CHANGE HERE FOR 3D
 
@@ -91,14 +91,21 @@ std::vector<std::shared_ptr<benchmarking::Benchmark>> create_more_obstacles_bm(i
 
     std::vector<std::shared_ptr<Benchmark>> bms;
 
-    for (int i : {15}) { // TODO: CHANGE HERE (number of obstacles)
+    for (int i : {25}) { // TODO: CHANGE HERE (number of obstacles)
         std::shared_ptr<Benchmark> b1 = create_basic_bm(iters);
 
         b1->name = std::to_string(i);
 
         for (int j = 0; j < i; j++) {
             Eigen::Vector3d pos = Eigen::Vector3d::Random() * 4 + Eigen::Vector3d::Constant(5.);
-            Eigen::Vector3d vel = Eigen::Vector3d::Random() * 0.5;
+            Eigen::Vector3d vel = Eigen::Vector3d::Random() * 0.1;
+
+            if (b1->is_2d)
+            {
+                pos[2] = 0;
+                vel[2] = 0;
+            }
+
             b1->moving_circles.push_back(MovingCircle(pos, 0.75, vel));
         }
 
@@ -124,6 +131,7 @@ int main(int argc, char const* argv[]) {
     factory.register_planner(std::make_shared<TPRMPlannerBenchmark>());
     factory.register_planner(std::make_shared<OMPLPlannerBenchmark>("PRM"));
     factory.register_planner(std::make_shared<OMPLPlannerBenchmark>("RRTstar"));
+    factory.register_planner(std::make_shared<OMPLPlannerBenchmark>("STRRTstar"));
 
     // Register result handlers
     factory.register_result_handler(std::make_shared<ResultHandlerPathLength>());
